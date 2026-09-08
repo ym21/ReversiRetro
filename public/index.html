@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>ReversiRetro — オセロ手順解析</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="../engine.js"></script>
+  </head>
+  <body>
+    <main class="shell">
+      <header>
+        <p class="eyebrow">REVERSI / RETRO</p>
+        <h1>オセロ手順解析</h1>
+        <p class="lede">入力した終局盤面へ到達する合法手順を、初期配置から逆算します。</p>
+      </header>
+
+      <section class="workspace" aria-label="盤面入力と解析">
+        <div class="board-panel">
+          <div id="board" class="board" role="grid" aria-label="オセロ盤"></div>
+          <div class="board-caption"><span>入力盤面</span><span id="replay-label">編集モード</span></div>
+        </div>
+
+        <div class="input-panel">
+          <div class="selector" aria-label="盤面に置く石">
+            <span class="selector-label">クリック入力</span>
+            <button type="button" class="picker selected" data-p="." aria-pressed="true">空</button>
+            <button type="button" class="picker" data-p="B" aria-pressed="false">黒</button>
+            <button type="button" class="picker" data-p="W" aria-pressed="false">白</button>
+            <button type="button" id="reset">初期配置</button>
+          </div>
+          <label for="text">8行テキスト（B=黒 / W=白 / .=空）</label>
+          <textarea id="text" rows="8" spellcheck="false" aria-describedby="input-status"></textarea>
+          <div id="counts" class="counts" aria-live="polite"></div>
+          <p id="input-status" class="input-status" aria-live="polite"></p>
+          <div class="actions">
+            <button type="button" id="go" class="primary">手順を復元</button>
+            <button type="button" id="cancel" disabled>停止</button>
+            <button type="button" id="copy" disabled>棋譜をコピー</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="status-panel" aria-label="探索状況">
+        <div class="status-heading"><h2>探索状況</h2><span id="status-badge" class="badge">待機中</span></div>
+        <p id="status" class="status" aria-live="polite">終局盤面を入力してください。</p>
+        <dl class="metrics">
+          <div><dt>経過</dt><dd id="elapsed">—</dd></div>
+          <div><dt>探索ノード</dt><dd id="nodes">—</dd></div>
+          <div><dt>キャッシュ</dt><dd id="cache">—</dd></div>
+          <div><dt>現在の石数</dt><dd id="current-stones">—</dd></div>
+        </dl>
+      </section>
+
+      <section class="transcript-panel" aria-label="棋譜再生">
+        <div class="section-heading"><h2>棋譜再生</h2><span id="step-label">0 / 0 手</span></div>
+        <div class="replay-controls" role="group" aria-label="棋譜再生コントロール">
+          <button type="button" id="first" disabled title="最初へ">|&lt;</button>
+          <button type="button" id="prev" disabled title="1手戻る">&lt;</button>
+          <button type="button" id="play" disabled title="再生">再生</button>
+          <button type="button" id="next" disabled title="1手進む">&gt;</button>
+          <button type="button" id="last" disabled title="最後へ">&gt;|</button>
+        </div>
+        <ol id="moves" class="moves" aria-label="復元された棋譜"></ol>
+      </section>
+
+      <footer>
+        <p>これは盤面から復元できる合法手順の一例です。過去の実戦棋譜を特定するものではありません。</p>
+      </footer>
+    </main>
+    <script src="app.js"></script>
+  </body>
+</html>

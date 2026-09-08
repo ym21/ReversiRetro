@@ -1,0 +1,423 @@
+/*
+ * Small, dependency-free Othello rules and reverse reconstruction engine.
+ *
+ * The module is deliberately usable from both Node and a Web Worker. Keep the
+ * board representation boring (eight strings) here: it makes the replay-proof
+ * and the UI easy to inspect, while leaving room for a bit-board
+ * implementation later if profiling says it is needed.
+ */
+
+const DIRECTIONS = [
+  [-1, -1], [-1, 0], [-1, 1],
+  [0, -1],           [0, 1],
+  [1, -1],  [1, 0],   [1, 1],
+];
+
+const INITIAL = [
+  '........',
+  '........',
+  '........',
+  '...WB...',
+  '...BW...',
+  '........',
+  '........',
+  '........',
+];
+
+const INITIAL_SQUARES = new Set(['D4', 'E4', 'D5', 'E5']);
+const VALID_PLAYERS = new Set(['B', 'W']);
+
+function opposite(player) {
+  if (player === 'B') return 'W';
+  if (player === 'W') return 'B';
+  throw new Error('player must be B or W');
+}
+
+function parse(board) {
+  if (!Array.isArray(board) || board.length !== 8 || board.some(
+    (row) => typeof row !== 'string' || row.length !== 8 || !/^[BW.]+$/.test(row),
+  )) {
+    throw new Error('board must be 8 rows of B/W/.');
+  }
+  return board.slice();
+}
+
+function boardKey(board) {
+  return board.join('/');
+}
+
+function count(board) {
+  const b = parse(board).join('');
+  return {
+    black: (b.match(/B/g) || []).length,
+    white: (b.match(/W/g) || []).length,
+    empty: (b.match(/\./g) || []).length,
+  };
+}
+
+function inBounds(row, column) {
+  return row >= 0 && row < 8 && column >= 0 && column < 8;
+}
+
+function flips(board, player, row, column) {
+  const b = parse(board);
+  if (!VALID_PLAYERS.has(player)) throw new Error('player must be B or W');
+  if (!Number.isInteger(row) || !Number.isInteger(column) || !inBounds(row, column)) return [];
+  if (b[row][column] !== '.') return [];
+
+  const other = opposite(player);
+  const result = [];
+  for (const [dr, dc] of DIRECTIONS) {
+    const line = [];
+    let r = row + dr;
+    let c = column + dc;
+    while (inBounds(r, c) && b[r][c] === other) {
+      line.push([r, c]);
+      r += dr;
+      c += dc;
+    }
+    if (line.length > 0 && inBounds(r, c) && b[r][c] === player) result.push(...line);
+  }
+  return result;
+}
+
+function legal(board, player) {
+  const b = parse(board);
+  const result = [];
+  for (let row = 0; row < 8; row += 1) {
+    for (let column = 0; column < 8; column += 1) {
+      const moved = flips(b, player, row, column);
+      if (moved.length > 0) result.push({ row, column, r: row, c: column, flips: moved });
+    }
+  }
+  return result;
+}
+
+function apply(board, player, row, column) {
+  const b = parse(board);
+  if (!VALID_PLAYERS.has(player)) throw new Error('player must be B or W');
+  const moved = flips(b, player, row, column);
+  if (moved.length === 0) throw new Error('illegal move');
+
+  const next = b.map((line) => line.split(''));
+  next[row][column] = player;
+  for (const [r, c] of moved) next[r][c] = player;
+  return { board: next.map((line) => line.join('')), flips: moved };
+}
+
+function coord(row, column) {
+  if (!Number.isInteger(row) || !Number.isInteger(column) || !inBounds(row, column)) {
+    throw new Error('coordinate is outside the board');
+  }
+  return String.fromCharCode(65 + column) + String(row + 1);
+}
+
+function parseCoord(value) {
+  if (typeof value !== 'string' || !/^[A-H][1-8]$/.test(value)) return null;
+  return { row: value.charCodeAt(1) - 49, column: value.charCodeAt(0) - 65 };
+}
+
+function validate(board, options = {}) {
+  let b;
+  try {
+    b = parse(board);
+  } catch (error) {
+    return error.message;
+  }
+
+  const stones = count(b);
+  if (stones.black + stones.white < 4) return 'at least four stones required';
+  for (const square of INITIAL_SQUARES) {
+    const point = parseCoord(square);
+    if (b[point.row][point.column] === '.') return 'initial four squares cannot be empty';
+  }
+
+  if (options.positionType === 'terminal') {
+    if (legal(b, 'B').length !== 0 || legal(b, 'W').length !== 0) return 'board is not terminal';
+  } else if (options.positionType && options.positionType !== 'any') {
+    return 'positionType must be terminal or any';
+  }
+  return null;
+}
+
+function sameBoard(left, right) {
+  return boardKey(left) === boardKey(right);
+}
+
+function sameSquareSet(left, right) {
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+  const a = left.map((item) => Array.isArray(item) ? `${item[0]},${item[1]}` : item).sort();
+  const b = right.map((item) => Array.isArray(item) ? `${item[0]},${item[1]}` : item).sort();
+  return a.every((value, index) => value === b[index]);
+}
+
+function eventLabel(event, index = null) {
+  const prefix = index === null ? '' : `${index + 1}. `;
+  return `${prefix}${event.player === 'B' ? 'Black' : 'White'} ${event.type === 'PASS' ? 'PASS' : event.square}`;
+}
+
+/*
+ * Generate every legal predecessor of (board, sideToMove).
+ *
+ * If p made the last move, p is opposite(sideToMove). In the current board a
+ * possible move square is a p stone. Looking out from it, the first k
+ * contiguous p stones (1 <= k < run length) can have been q stones before the
+ * move; the (k + 1)th p stone is the anchor. The cell after the whole run is
+ * irrelevant. Every candidate is checked by applying the ordinary forward
+ * rule, which keeps this reverse enumeration sound at edges and corners.
+ */
+function generatePredecessors(board, sideToMove) {
+  const current = parse(board);
+  if (!VALID_PLAYERS.has(sideToMove)) throw new Error('sideToMove must be B or W');
+  const prior = opposite(sideToMove);
+  const result = [];
+
+  for (let row = 0; row < 8; row += 1) {
+    for (let column = 0; column < 8; column += 1) {
+      if (current[row][column] !== prior) continue;
+      const square = coord(row, column);
+      if (INITIAL_SQUARES.has(square)) continue;
+
+      const choicesByDirection = [];
+      for (const [dr, dc] of DIRECTIONS) {
+        const run = [];
+        let r = row + dr;
+        let c = column + dc;
+        while (inBounds(r, c) && current[r][c] === prior) {
+          run.push([r, c]);
+          r += dr;
+          c += dc;
+        }
+
+        // Option zero means this direction did not flip. A flip of length k
+        // needs a p anchor at run[k], so k is strictly less than run.length.
+        const choices = [[]];
+        for (let k = 1; k < run.length; k += 1) choices.push(run.slice(0, k));
+        choicesByDirection.push(choices);
+      }
+
+      const selected = [];
+      const enumerate = (directionIndex) => {
+        if (directionIndex === choicesByDirection.length) {
+          if (selected.length === 0) return;
+          const predecessor = current.map((line) => line.split(''));
+          predecessor[row][column] = '.';
+          for (const [r, c] of selected) predecessor[r][c] = sideToMove;
+          const previousBoard = predecessor.map((line) => line.join(''));
+          try {
+            const forward = apply(previousBoard, prior, row, column);
+            if (!sameBoard(forward.board, current)) return;
+            result.push({
+              board: previousBoard,
+              sideToMove: prior,
+              event: {
+                player: prior,
+                type: 'MOVE',
+                square,
+                flips: forward.flips.map(([r, c]) => coord(r, c)),
+              },
+            });
+          } catch {
+            // The ordinary forward validator is authoritative.
+          }
+          return;
+        }
+
+        for (const choice of choicesByDirection[directionIndex]) {
+          const length = selected.length;
+          selected.push(...choice);
+          enumerate(directionIndex + 1);
+          selected.length = length;
+        }
+      };
+      enumerate(0);
+    }
+  }
+  return result;
+}
+
+function replay(events, options = {}) {
+  const start = parse(options.start || INITIAL);
+  if (!Array.isArray(events)) throw new Error('events must be an array');
+  let board = start;
+  let side = options.sideToMove || 'B';
+  if (!VALID_PLAYERS.has(side)) throw new Error('sideToMove must be B or W');
+  const snapshots = [{ board: board.slice(), event: null, placed: null, flips: [] }];
+
+  for (const event of events) {
+    if (!event || event.player !== side || !VALID_PLAYERS.has(event.player)) {
+      throw new Error('event player does not match the side to move');
+    }
+    if (event.type === 'PASS') {
+      if (legal(board, side).length !== 0) throw new Error('pass is only legal without a move');
+      if (legal(board, opposite(side)).length === 0) throw new Error('both sides have no legal move');
+      board = board.slice();
+      snapshots.push({ board: board.slice(), event, placed: null, flips: [] });
+      side = opposite(side);
+      continue;
+    }
+    if (event.type !== 'MOVE') throw new Error('event type must be MOVE or PASS');
+    const point = parseCoord(event.square);
+    if (!point) throw new Error('move square is invalid');
+    const moved = apply(board, side, point.row, point.column);
+    if (event.flips && !sameSquareSet(event.flips, moved.flips.map(([r, c]) => coord(r, c)))) {
+      throw new Error('event flips do not match the legal move');
+    }
+    board = moved.board;
+    snapshots.push({
+      board: board.slice(),
+      event,
+      placed: event.square,
+      flips: moved.flips.map(([r, c]) => coord(r, c)),
+    });
+    side = opposite(side);
+  }
+  return { board: board.slice(), sideToMove: side, snapshots };
+}
+
+function replayTo(events, step, options = {}) {
+  if (!Number.isInteger(step) || step < 0 || step > events.length) throw new Error('replay step is out of range');
+  return replay(events.slice(0, step), options);
+}
+
+function reconstruct(target, options = {}) {
+  const positionType = options.positionType || 'any';
+  let t;
+  try {
+    t = parse(target);
+  } catch (error) {
+    return { status: 'INVALID_INPUT', error: error.message };
+  }
+  const validationError = validate(t, { positionType });
+  if (validationError) return { status: 'INVALID_INPUT', error: validationError };
+
+  const maxNodes = Number.isFinite(options.maxNodes) ? Math.max(0, Math.floor(options.maxNodes)) : 50000;
+  const maxMs = Number.isFinite(options.maxMs) ? Math.max(0, options.maxMs) : 3000;
+  const onProgress = typeof options.onProgress === 'function' ? options.onProgress : () => {};
+  const cancelled = typeof options.cancelled === 'function' ? options.cancelled : () => false;
+  const startTime = Date.now();
+  const deadline = startTime + maxMs;
+  let nodesVisited = 0;
+  let timedOut = false;
+  let foundPath = null;
+  const failed = new Set();
+
+  const progress = (board) => {
+    try {
+      onProgress({
+        nodesVisited,
+        currentStones: count(board).black + count(board).white,
+        cacheSize: failed.size,
+        elapsedMs: Date.now() - startTime,
+      });
+    } catch {
+      // Progress reporting must never change search semantics.
+    }
+  };
+
+  const dfs = (board, sideToMove, reverseEvents) => {
+    if (cancelled()) return 'cancel';
+    if (sameBoard(board, INITIAL) && sideToMove === 'B') {
+      foundPath = reverseEvents.slice().reverse();
+      return 'found';
+    }
+    if (Date.now() >= deadline || nodesVisited >= maxNodes) {
+      timedOut = true;
+      return 'timeout';
+    }
+    nodesVisited += 1;
+    if (nodesVisited === 1 || nodesVisited % 100 === 0) progress(board);
+
+    const key = `${boardKey(board)}|${sideToMove}`;
+    if (failed.has(key)) return 'no';
+    const stones = count(board);
+    if (stones.black + stones.white === 4) {
+      failed.add(key);
+      return 'no';
+    }
+
+    const prior = opposite(sideToMove);
+    const currentMoves = legal(board, sideToMove);
+    const priorMoves = legal(board, prior);
+
+    // Reverse a pass only when the previous player had no move and the side
+    // that received the turn does have one. A terminal (both-pass) position
+    // therefore never gains a spurious pass event.
+    if (priorMoves.length === 0 && currentMoves.length > 0) {
+      const passEvent = { player: prior, type: 'PASS' };
+      const passResult = dfs(board, prior, reverseEvents.concat(passEvent));
+      if (passResult === 'found' || passResult === 'cancel') return passResult;
+      if (passResult === 'timeout') return passResult;
+    }
+
+    const predecessors = generatePredecessors(board, sideToMove);
+    // Fewer flips usually gets back toward the sparse opening sooner. This
+    // changes only order; every verified predecessor remains in the search.
+    predecessors.sort((left, right) => left.event.flips.length - right.event.flips.length);
+    for (const predecessor of predecessors) {
+      const result = dfs(predecessor.board, predecessor.sideToMove, reverseEvents.concat(predecessor.event));
+      if (result === 'found' || result === 'cancel') return result;
+      if (result === 'timeout') return result;
+    }
+
+    failed.add(key);
+    return 'no';
+  };
+
+  const requestedSide = options.sideToMove;
+  // A terminal board has no meaningful next player. The specification
+  // therefore requires both possible side-to-move roots to be searched.
+  const roots = positionType === 'terminal'
+    ? ['B', 'W']
+    : (requestedSide === 'B' || requestedSide === 'W' ? [requestedSide] : ['B', 'W']);
+  for (const side of roots) {
+    const result = dfs(t, side, []);
+    if (result === 'found') {
+      let verified;
+      try {
+        verified = replay(foundPath);
+      } catch (error) {
+        return { status: 'ERROR', error: `FOUND replay verification failed: ${error.message}`, nodesVisited, cacheSize: failed.size };
+      }
+      if (!sameBoard(verified.board, t)) {
+        return { status: 'ERROR', error: 'FOUND replay verification ended at another board', nodesVisited, cacheSize: failed.size };
+      }
+      return {
+        status: 'FOUND',
+        nodesVisited,
+        cacheSize: failed.size,
+        elapsedMs: Date.now() - startTime,
+        solution: { events: foundPath },
+      };
+    }
+    if (result === 'cancel') return { status: 'CANCELLED', nodesVisited, cacheSize: failed.size, elapsedMs: Date.now() - startTime };
+    // Do not turn a timeout on one root side into a proof. The other root is
+    // still attempted when budget remains, and the aggregate result below
+    // reports UNKNOWN_TIMEOUT if any root was cut short.
+  }
+
+  if (timedOut) return { status: 'UNKNOWN_TIMEOUT', nodesVisited, cacheSize: failed.size, elapsedMs: Date.now() - startTime };
+  return { status: 'UNREACHABLE_PROVEN', nodesVisited, cacheSize: failed.size, elapsedMs: Date.now() - startTime };
+}
+
+const api = {
+  initial: INITIAL.slice(),
+  opposite,
+  parse,
+  count,
+  flips,
+  legal,
+  apply,
+  coord,
+  parseCoord,
+  validate,
+  generatePredecessors,
+  predecessors: generatePredecessors,
+  eventLabel,
+  replay,
+  replayTo,
+  reconstruct,
+};
+
+if (typeof module !== 'undefined' && module.exports) module.exports = api;
+if (typeof self !== 'undefined') self.ReversiEngine = api;
