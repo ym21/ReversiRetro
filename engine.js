@@ -102,8 +102,7 @@ function inBounds(row, column) {
   return row >= 0 && row < 8 && column >= 0 && column < 8;
 }
 
-function flips(board, player, row, column) {
-  const b = parse(board);
+function flipsParsed(b, player, row, column) {
   if (!VALID_PLAYERS.has(player)) throw new Error('player must be B or W');
   if (!Number.isInteger(row) || !Number.isInteger(column) || !inBounds(row, column)) return [];
   if (b[row][column] !== '.') return [];
@@ -124,12 +123,16 @@ function flips(board, player, row, column) {
   return result;
 }
 
+function flips(board, player, row, column) {
+  return flipsParsed(parse(board), player, row, column);
+}
+
 function legal(board, player) {
   const b = parse(board);
   const result = [];
   for (let row = 0; row < 8; row += 1) {
     for (let column = 0; column < 8; column += 1) {
-      const moved = flips(b, player, row, column);
+      const moved = flipsParsed(b, player, row, column);
       if (moved.length > 0) result.push({ row, column, r: row, c: column, flips: moved });
     }
   }
@@ -139,7 +142,7 @@ function legal(board, player) {
 function apply(board, player, row, column) {
   const b = parse(board);
   if (!VALID_PLAYERS.has(player)) throw new Error('player must be B or W');
-  const moved = flips(b, player, row, column);
+  const moved = flipsParsed(b, player, row, column);
   if (moved.length === 0) throw new Error('illegal move');
 
   const next = b.map((line) => line.split(''));
@@ -323,9 +326,7 @@ function replayTo(events, step, options = {}) {
   return replay(events.slice(0, step), options);
 }
 
-function targetPruneReason(board, target) {
-  const current = parse(board);
-  const expected = parse(target);
+function targetPruneParsed(current, expected) {
   for (let row = 0; row < 8; row += 1) {
     for (let column = 0; column < 8; column += 1) {
       const stone = current[row][column];
@@ -360,6 +361,10 @@ function targetPruneReason(board, target) {
     }
   }
   return null;
+}
+
+function targetPruneReason(board, target) {
+  return targetPruneParsed(parse(board), parse(target));
 }
 
 function targetProfile(board, target) {
@@ -453,8 +458,38 @@ function reconstruct(target, options = {}) {
     : null;
   const expectedTargetSide = positionType === 'terminal' ? null : requestedTargetSide;
   let forwardCacheSize = 0;
-  const targetForward = () => {
+  const targetCounts = count(t);
+  const correctCornerCount = (board) => [[0, 0], [0, 7], [7, 0], [7, 7]]
+    .filter(([row, column]) => board[row][column] !== '.' && board[row][column] === t[row][column]).length;
+  const deterministicNoise = (board, salt) => {
+    let hash = (2166136261 ^ salt) >>> 0;
+    for (const row of board) for (let index = 0; index < 8; index += 1) {
+      hash ^= row.charCodeAt(index);
+      hash = Math.imul(hash, 16777619) >>> 0;
+    }
+    return hash % 20000;
+  };
+
+  // Different final positions need incompatible temporary play. Each policy
+  // receives its own transposition set and a fair budget slice, so a greedy
+  // policy cannot consume the entire search before another policy starts.
+  const policies = targetCounts.black === targetStoneCount
+    ? ['survival', 'goal', 'mobility']
+    : targetCounts.white === targetStoneCount
+      ? ['goal', 'survival', 'mobility']
+    : ['corners', 'corners', 'corners', 'corners', 'survival', 'goal', 'mobility'];
+  const policyNodeBudget = maxNodes === null
+    ? (Number.isFinite(options.policySliceNodes) ? Math.max(1, Math.floor(options.policySliceNodes)) : 1000000)
+    : Math.max(1, Math.floor(maxNodes / policies.length));
+  const policyMsBudget = maxMs === null
+    ? (Number.isFinite(options.policySliceMs) ? Math.max(1, options.policySliceMs) : 30000)
+    : Math.max(1, Math.floor(maxMs / policies.length));
+  let forwardIncomplete = false;
+
+  const targetForward = (policy, policyIndex) => {
     const seen = new Set();
+    const policyStartNodes = nodesVisited;
+    const policyDeadline = policyMsBudget === null ? null : Date.now() + policyMsBudget;
     const rememberSeen = (key) => {
       if (seen.size >= maxCacheEntries) {
         const removeCount = Math.max(1, Math.ceil(maxCacheEntries / 4));
@@ -467,17 +502,51 @@ function reconstruct(target, options = {}) {
         }
       }
       seen.add(key);
-      forwardCacheSize = seen.size;
+      forwardCacheSize = Math.max(forwardCacheSize, seen.size);
+    };
+    const scoreBoard = (board, side, flipCount) => {
+      const profile = targetProfile(board, t);
+      const white = profile.occupied - profile.black;
+      const mismatch = profile.occupied - profile.matches;
+      const agreement = profile.matches - mismatch;
+      const progressRatio = (profile.occupied - 4) / Math.max(1, targetStoneCount - 4);
+      const blackMobility = legal(board, 'B').length;
+      const whiteMobility = legal(board, 'W').length;
+      const mobility = blackMobility + whiteMobility;
+      const minority = Math.min(profile.black, white);
+      const corners = correctCornerCount(board);
+      if (policy === 'goal') {
+        return agreement * 1000 - mobility + corners * 200;
+      }
+      if (policy === 'survival') {
+        return mobility * 150 + minority * 250
+          + agreement * (10 + progressRatio ** 7 * 2500) + corners * 150;
+      }
+      if (policy === 'corners') {
+        const safeWhiteCorners = legal(board, 'W').filter(({ row, column }) => {
+          if (!((row === 0 || row === 7) && (column === 0 || column === 7))) return false;
+          return !targetPruneParsed(apply(board, 'W', row, column).board, t);
+        }).length;
+        return corners * 200000 + safeWhiteCorners * 25000 + mobility * 120
+          + minority * 180 + agreement * progressRatio ** 9 * 4000
+          + deterministicNoise(board, policyIndex + 1);
+      }
+      return mobility * 500 + minority * 100 + corners * 50
+        + agreement * progressRatio ** 6 * 1000 - flipCount;
     };
     const search = (board, side, events, movesMade) => {
       if (cancelled()) return 'cancel';
-      if ((deadline !== null && Date.now() >= deadline) || (maxNodes !== null && nodesVisited >= maxNodes)) {
-        timedOut = true; return 'timeout';
+      if ((deadline !== null && Date.now() >= deadline)
+        || (policyDeadline !== null && Date.now() >= policyDeadline)
+        || (maxNodes !== null && nodesVisited >= maxNodes)
+        || (policyNodeBudget !== null && nodesVisited - policyStartNodes >= policyNodeBudget)) {
+        forwardIncomplete = true;
+        return 'timeout';
       }
       nodesVisited += 1;
-      if (nodesVisited === 1 || nodesVisited % 100 === 0) progress(board, seen.size, 'TARGET_FORWARD');
+      if (nodesVisited === 1 || nodesVisited % 1000 === 0) progress(board, seen.size, `TARGET_${policy.toUpperCase()}`);
+      if (targetPruneParsed(board, t)) return 'no';
       const stones = count(board);
-      if (targetPruneReason(board, t)) return 'no';
       if (stones.black + stones.white === targetStoneCount) {
         if (sameBoard(board, t) && (expectedTargetSide === null || side === expectedTargetSide)) {
           foundPath = events;
@@ -486,60 +555,53 @@ function reconstruct(target, options = {}) {
         return 'no';
       }
       if (movesMade >= targetStoneCount - 4) return 'no';
-      // The target can be asymmetric, so symmetric current boards are not
-      // generally equivalent relative to it. Use the exact board here;
-      // symmetry canonicalization remains safe in reverse search because the
-      // standard initial board is symmetric.
       const key = `${side}|${boardKey(board)}`;
       if (seen.has(key)) return 'no';
       rememberSeen(key);
       let moves = legal(board, side);
-      const otherMoves = legal(board, opposite(side));
       if (moves.length === 0) {
-        if (otherMoves.length === 0) return 'no';
-        const result = search(board, opposite(side), events.concat({ player: side, type: 'PASS' }), movesMade);
-        if (result !== 'no') return result;
-        return 'no';
+        if (legal(board, opposite(side)).length === 0) return 'no';
+        return search(board, opposite(side), events.concat({ player: side, type: 'PASS' }), movesMade);
       }
-      const before = targetProfile(board, t);
       moves = moves.map((move) => {
         const next = apply(board, side, move.row, move.column);
-        if (targetPruneReason(next.board, t)) return null;
-        const after = targetProfile(next.board, t);
-        const mobility = legal(next.board, 'B').length + legal(next.board, 'W').length;
-        const corners = [[0, 0], [0, 7], [7, 0], [7, 7]]
-          .filter(([row, column]) => next.board[row][column] === t[row][column]).length;
-        // The agreement delta is colour-independent: a black move that flips
-        // fewer white stones is preferred for an all-white target, while a
-        // white move that flips more black stones is preferred. The rest is
-        // heuristic ordering only; every soundly legal child is retained.
-        const agreementDelta = after.matches - before.matches;
-        const score = agreementDelta * 1000
-          + after.matches * 5
-          - (after.occupied - after.matches) * 50
-          - mobility
-          + corners * 200;
-        return { move, next, score };
-      }).filter(Boolean).sort((a, b) => b.score - a.score);
+        if (targetPruneParsed(next.board, t)) return null;
+        return { move, next, score: scoreBoard(next.board, side, next.flips.length) };
+      }).filter(Boolean).sort((left, right) => right.score - left.score);
       for (const { move, next } of moves) {
         const event = { player: side, type: 'MOVE', square: coord(move.row, move.column), flips: next.flips.map(([r, c]) => coord(r, c)) };
-        const result = search(next.board, opposite(side), events.concat(event), movesMade + 1);
-        if (result !== 'no') return result;
+        const child = search(next.board, opposite(side), events.concat(event), movesMade + 1);
+        if (child !== 'no') return child;
       }
       return 'no';
     };
     return search(INITIAL.slice(), 'B', [], 0);
   };
 
-  // A standard game always starts with Black. target.sideToMove describes the
-  // requested target interpretation and must never be used as a second root.
-  const result = targetForward();
-  if (result === 'found') {
-    const verified = replay(foundPath);
-    if (!sameBoard(verified.board, t)) return { status: 'ERROR', searchStrategy: 'TARGET_FORWARD', error: 'FOUND replay mismatch', nodesVisited };
-    return { status: 'FOUND', searchStrategy: 'TARGET_FORWARD', nodesVisited, cacheSize: forwardCacheSize, cacheEvictions, elapsedMs: Date.now() - startTime, solution: { events: foundPath } };
+  let policyIndex = 0;
+  let cycleIncomplete = false;
+  let forwardExhausted = false;
+  while (unlimited || policyIndex < policies.length) {
+    const result = targetForward(policies[policyIndex % policies.length], policyIndex);
+    if (result === 'found') {
+      const verified = replay(foundPath);
+      if (!sameBoard(verified.board, t)) return { status: 'ERROR', searchStrategy: 'TARGET_PORTFOLIO', error: 'FOUND replay mismatch', nodesVisited };
+      return { status: 'FOUND', searchStrategy: 'TARGET_PORTFOLIO', searchPolicy: policies[policyIndex % policies.length], nodesVisited, cacheSize: forwardCacheSize, cacheEvictions, elapsedMs: Date.now() - startTime, solution: { events: foundPath } };
+    }
+    if (result === 'cancel') return { status: 'CANCELLED', searchStrategy: 'TARGET_PORTFOLIO', nodesVisited, cacheSize: forwardCacheSize, cacheEvictions, elapsedMs: Date.now() - startTime };
+    if (result === 'timeout') cycleIncomplete = true;
+    policyIndex += 1;
+    if (policyIndex % policies.length === 0) {
+      if (!cycleIncomplete) {
+        forwardExhausted = true;
+        break;
+      }
+      cycleIncomplete = false;
+    }
   }
-  if (result === 'cancel') return { status: 'CANCELLED', searchStrategy: 'TARGET_FORWARD', nodesVisited, cacheSize: forwardCacheSize, cacheEvictions, elapsedMs: Date.now() - startTime };
+  if (forwardIncomplete && !forwardExhausted) {
+    return { status: 'UNKNOWN_TIMEOUT', searchStrategy: 'TARGET_PORTFOLIO', nodesVisited, cacheSize: forwardCacheSize, cacheEvictions, elapsedMs: Date.now() - startTime };
+  }
 
   const dfs = (board, sideToMove, reverseEvents) => {
     if (cancelled()) return 'cancel';

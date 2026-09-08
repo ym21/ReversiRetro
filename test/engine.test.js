@@ -202,9 +202,24 @@ test('target-directed forward search derives the all-white terminal board', () =
     maxMs: 30000,
   });
   assert.equal(result.status, 'FOUND');
-  assert.equal(result.searchStrategy, 'TARGET_FORWARD');
+  assert.equal(result.searchStrategy, 'TARGET_PORTFOLIO');
+  assert.equal(result.searchPolicy, 'goal');
   assert.ok(result.nodesVisited > 0);
   assert.ok(result.nodesVisited < 5000000);
+  assert.deepEqual(E.replay(result.solution.events).board, target);
+});
+
+test('survival policy derives the all-black terminal board without greedy starvation', () => {
+  const target = Array(8).fill('BBBBBBBB');
+  const result = E.reconstruct(target, {
+    positionType: 'terminal',
+    maxNodes: 5000000,
+    maxMs: 30000,
+  });
+  assert.equal(result.status, 'FOUND');
+  assert.equal(result.searchStrategy, 'TARGET_PORTFOLIO');
+  assert.equal(result.searchPolicy, 'survival');
+  assert.ok(result.nodesVisited < 10000);
   assert.deepEqual(E.replay(result.solution.events).board, target);
 });
 

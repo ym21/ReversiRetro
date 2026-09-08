@@ -54,7 +54,7 @@
   }
 
   function formatSearchStrategy(strategy) {
-    if (strategy === 'TARGET_FORWARD') return '目標指向・前向き探索';
+    if (strategy === 'TARGET_PORTFOLIO' || (typeof strategy === 'string' && strategy.startsWith('TARGET_'))) return '目標指向・方針分散探索';
     if (strategy === 'REVERSE_DFS') return '逆向きDFS';
     return '—';
   }
@@ -279,7 +279,7 @@
         snapshots = replayed.snapshots;
         replayStep = 0;
         replayMode = true;
-        const strategyLabel = result.searchStrategy === 'TARGET_FORWARD' ? '目標指向の前向き探索で' : '逆向きDFSで';
+        const strategyLabel = result.searchStrategy === 'TARGET_PORTFOLIO' ? '目標指向の方針分散探索で' : '逆向きDFSで';
         setStatus(`${strategyLabel}合法手順を発見しました。${events.length}手を再生できます。`, 'success');
         updateMetrics({ currentStones: 4 });
       } catch (error) {
