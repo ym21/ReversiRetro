@@ -54,7 +54,7 @@
   }
 
   function formatSearchStrategy(strategy) {
-    if (strategy === 'VERIFIED_BOOK') return '検証済み棋譜帳';
+    if (strategy === 'TARGET_FORWARD') return '目標指向・前向き探索';
     if (strategy === 'REVERSE_DFS') return '逆向きDFS';
     return '—';
   }
@@ -279,7 +279,7 @@
         snapshots = replayed.snapshots;
         replayStep = 0;
         replayMode = true;
-        const strategyLabel = result.searchStrategy === 'VERIFIED_BOOK' ? '検証済み棋譜帳から' : '逆向きDFSで';
+        const strategyLabel = result.searchStrategy === 'TARGET_FORWARD' ? '目標指向の前向き探索で' : '逆向きDFSで';
         setStatus(`${strategyLabel}合法手順を発見しました。${events.length}手を再生できます。`, 'success');
         updateMetrics({ currentStones: 4 });
       } catch (error) {

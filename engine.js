@@ -323,78 +323,60 @@ function replayTo(events, step, options = {}) {
   return replay(events.slice(0, step), options);
 }
 
-const VERIFIED_BOOK_SOURCES = Object.freeze([
-  Object.freeze({
-    id: 'all-white',
-    coordinates: Object.freeze('F5 F6 E6 D6 C3 G5 C6 B6 F7 E7 E8 C5 H4 D7 C4 D3 E2 G6 D8 H5 G4 F4 E3 C7 H7 H6 G7 H8 G3 H3 B8 F8 A6 G2 B5 C8 G8 A8 H2 H1 G1 F3 F2 F1 E1 D2 B4 C2 A5 A4 B7 B3 B2 D1 A3 A2 A1 C1 A7 B1'.split(' ')),
-  }),
-  Object.freeze({
-    id: 'all-black',
-    coordinates: Object.freeze('D3 C5 E6 F7 C6 C4 D6 F5 B5 B3 B6 F4 E3 D7 C3 B4 F3 C7 A3 A4 A5 A6 A7 C2 D2 D1 E2 E1 F2 G3 G4 H3 H5 G5 C8 B2 D8 A2 A1 G2 G8 E7 H1 G1 B1 G7 H4 H6 C1 B8 F1 E8 H2 F6 G6 H7 H8 F8 A8 B7'.split(' ')),
-  }),
-]);
-
-function cloneEvents(events) {
-  return events.map((event) => ({
-    ...event,
-    ...(event.flips ? { flips: event.flips.slice() } : {}),
-  }));
-}
-
-// Build the small verified book through the same legal/apply path used by
-// ordinary play. A pass is inserted only immediately before a coordinate
-// when the side to move has no legal move and the other side does.
-function buildVerifiedBookLine(coordinates) {
-  let board = INITIAL.slice();
-  let side = 'B';
-  const events = [];
-
-  for (const square of coordinates) {
-    if (legal(board, side).length === 0) {
-      const other = opposite(side);
-      if (legal(board, other).length === 0) throw new Error('verified book line ended before all coordinates');
-      events.push({ player: side, type: 'PASS' });
-      side = other;
+function targetPruneReason(board, target) {
+  const current = parse(board);
+  const expected = parse(target);
+  for (let row = 0; row < 8; row += 1) {
+    for (let column = 0; column < 8; column += 1) {
+      const stone = current[row][column];
+      if (stone === '.') continue;
+      if (expected[row][column] === '.') return 'target-empty-occupancy';
+      if ((row === 0 || row === 7) && (column === 0 || column === 7)
+        && stone !== expected[row][column]) return 'corner-mismatch';
     }
-
-    const point = parseCoord(square);
-    if (!point) throw new Error(`verified book coordinate is invalid: ${square}`);
-    const moved = apply(board, side, point.row, point.column);
-    events.push({
-      player: side,
-      type: 'MOVE',
-      square,
-      flips: moved.flips.map(([row, column]) => coord(row, column)),
-    });
-    board = moved.board;
-    side = opposite(side);
   }
 
-  return { board, sideToMove: side, events };
-}
-
-function createVerifiedSolutionBook() {
-  const byBoard = new Map();
-  for (const source of VERIFIED_BOOK_SOURCES) {
-    const built = buildVerifiedBookLine(source.coordinates);
-    const verified = replay(built.events);
-    if (!sameBoard(verified.board, built.board)) throw new Error(`verified book replay mismatch: ${source.id}`);
-    const entry = Object.freeze({
-      id: source.id,
-      coordinateCount: source.coordinates.length,
-      eventCount: built.events.length,
-      sideToMove: built.sideToMove,
-      board: verified.board.slice(),
-      events: cloneEvents(built.events),
-    });
-    const key = boardKey(entry.board);
-    if (byBoard.has(key)) throw new Error(`duplicate verified book board: ${source.id}`);
-    byBoard.set(key, entry);
+  // A same-colour edge run connected to an occupied corner is stable. An
+  // edge disc cannot be bracketed from outside the board, and the corner end
+  // can never change. This is deliberately conservative: uncertain interior
+  // stability is not used for pruning.
+  const corners = [
+    { row: 0, column: 0, rays: [[0, 1], [1, 0]] },
+    { row: 0, column: 7, rays: [[0, -1], [1, 0]] },
+    { row: 7, column: 0, rays: [[0, 1], [-1, 0]] },
+    { row: 7, column: 7, rays: [[0, -1], [-1, 0]] },
+  ];
+  for (const corner of corners) {
+    const color = current[corner.row][corner.column];
+    if (color === '.') continue;
+    for (const [dr, dc] of corner.rays) {
+      let row = corner.row + dr;
+      let column = corner.column + dc;
+      while (inBounds(row, column) && current[row][column] === color) {
+        if (expected[row][column] !== color) return 'stable-edge-mismatch';
+        row += dr;
+        column += dc;
+      }
+    }
   }
-  return byBoard;
+  return null;
 }
 
-const VERIFIED_SOLUTION_BOOK = createVerifiedSolutionBook();
+function targetProfile(board, target) {
+  let matches = 0;
+  let black = 0;
+  let occupied = 0;
+  for (let row = 0; row < 8; row += 1) {
+    for (let column = 0; column < 8; column += 1) {
+      const stone = board[row][column];
+      if (stone === '.') continue;
+      occupied += 1;
+      if (stone === 'B') black += 1;
+      if (stone === target[row][column]) matches += 1;
+    }
+  }
+  return { matches, black, occupied };
+}
 
 function reconstruct(target, options = {}) {
   const positionType = options.positionType || 'any';
@@ -408,49 +390,6 @@ function reconstruct(target, options = {}) {
   if (validationError) return { status: 'INVALID_INPUT', error: validationError };
 
   const searchStartedAt = Date.now();
-  const verifiedBookEntry = VERIFIED_SOLUTION_BOOK.get(boardKey(t));
-  if (verifiedBookEntry) {
-    // Verify the copied line at lookup time as well as when the module-level
-    // book is built. This keeps the fast path subject to the same replay
-    // guarantee as a DFS result and prevents mutable result data leaking into
-    // the shared book.
-    const solutionEvents = cloneEvents(verifiedBookEntry.events);
-    let verified;
-    try {
-      verified = replay(solutionEvents);
-    } catch (error) {
-      return {
-        status: 'ERROR',
-        searchStrategy: 'VERIFIED_BOOK',
-        error: `VERIFIED_BOOK replay verification failed: ${error.message}`,
-        nodesVisited: 0,
-        cacheSize: 0,
-        cacheEvictions: 0,
-        elapsedMs: Date.now() - searchStartedAt,
-      };
-    }
-    if (!sameBoard(verified.board, t)) {
-      return {
-        status: 'ERROR',
-        searchStrategy: 'VERIFIED_BOOK',
-        error: 'VERIFIED_BOOK replay verification ended at another board',
-        nodesVisited: 0,
-        cacheSize: 0,
-        cacheEvictions: 0,
-        elapsedMs: Date.now() - searchStartedAt,
-      };
-    }
-    return {
-      status: 'FOUND',
-      searchStrategy: 'VERIFIED_BOOK',
-      bookId: verifiedBookEntry.id,
-      nodesVisited: 0,
-      cacheSize: 0,
-      cacheEvictions: 0,
-      elapsedMs: Date.now() - searchStartedAt,
-      solution: { events: solutionEvents },
-    };
-  }
 
   const unlimited = options.unlimited === true;
   const maxNodes = unlimited || options.maxNodes === null
@@ -491,19 +430,116 @@ function reconstruct(target, options = {}) {
     failed.add(key);
   };
 
-  const progress = (board) => {
+  const progress = (board, cacheSize = failed.size, searchStrategy = null) => {
     try {
       onProgress({
         nodesVisited,
         currentStones: count(board).black + count(board).white,
-        cacheSize: failed.size,
+        cacheSize,
         cacheEvictions,
+        searchStrategy,
         elapsedMs: Date.now() - startTime,
       });
     } catch {
       // Progress reporting must never change search semantics.
     }
   };
+
+  // Target-directed forward search. Occupancy and fixed-corner checks are
+  // sound: stones are never removed, and a corner can never be flipped.
+  const targetStoneCount = count(t).black + count(t).white;
+  const requestedTargetSide = options.sideToMove === 'B' || options.sideToMove === 'W'
+    ? options.sideToMove
+    : null;
+  const expectedTargetSide = positionType === 'terminal' ? null : requestedTargetSide;
+  let forwardCacheSize = 0;
+  const targetForward = () => {
+    const seen = new Set();
+    const rememberSeen = (key) => {
+      if (seen.size >= maxCacheEntries) {
+        const removeCount = Math.max(1, Math.ceil(maxCacheEntries / 4));
+        const oldest = seen.values();
+        for (let index = 0; index < removeCount; index += 1) {
+          const entry = oldest.next();
+          if (entry.done) break;
+          seen.delete(entry.value);
+          cacheEvictions += 1;
+        }
+      }
+      seen.add(key);
+      forwardCacheSize = seen.size;
+    };
+    const search = (board, side, events, movesMade) => {
+      if (cancelled()) return 'cancel';
+      if ((deadline !== null && Date.now() >= deadline) || (maxNodes !== null && nodesVisited >= maxNodes)) {
+        timedOut = true; return 'timeout';
+      }
+      nodesVisited += 1;
+      if (nodesVisited === 1 || nodesVisited % 100 === 0) progress(board, seen.size, 'TARGET_FORWARD');
+      const stones = count(board);
+      if (targetPruneReason(board, t)) return 'no';
+      if (stones.black + stones.white === targetStoneCount) {
+        if (sameBoard(board, t) && (expectedTargetSide === null || side === expectedTargetSide)) {
+          foundPath = events;
+          return 'found';
+        }
+        return 'no';
+      }
+      if (movesMade >= targetStoneCount - 4) return 'no';
+      // The target can be asymmetric, so symmetric current boards are not
+      // generally equivalent relative to it. Use the exact board here;
+      // symmetry canonicalization remains safe in reverse search because the
+      // standard initial board is symmetric.
+      const key = `${side}|${boardKey(board)}`;
+      if (seen.has(key)) return 'no';
+      rememberSeen(key);
+      let moves = legal(board, side);
+      const otherMoves = legal(board, opposite(side));
+      if (moves.length === 0) {
+        if (otherMoves.length === 0) return 'no';
+        const result = search(board, opposite(side), events.concat({ player: side, type: 'PASS' }), movesMade);
+        if (result !== 'no') return result;
+        return 'no';
+      }
+      const before = targetProfile(board, t);
+      moves = moves.map((move) => {
+        const next = apply(board, side, move.row, move.column);
+        if (targetPruneReason(next.board, t)) return null;
+        const after = targetProfile(next.board, t);
+        const mobility = legal(next.board, 'B').length + legal(next.board, 'W').length;
+        const corners = [[0, 0], [0, 7], [7, 0], [7, 7]]
+          .filter(([row, column]) => next.board[row][column] === t[row][column]).length;
+        // The agreement delta is colour-independent: a black move that flips
+        // fewer white stones is preferred for an all-white target, while a
+        // white move that flips more black stones is preferred. The rest is
+        // heuristic ordering only; every soundly legal child is retained.
+        const agreementDelta = after.matches - before.matches;
+        const score = agreementDelta * 1000
+          + after.matches * 5
+          - (after.occupied - after.matches) * 50
+          - mobility
+          + corners * 200;
+        return { move, next, score };
+      }).filter(Boolean).sort((a, b) => b.score - a.score);
+      for (const { move, next } of moves) {
+        const event = { player: side, type: 'MOVE', square: coord(move.row, move.column), flips: next.flips.map(([r, c]) => coord(r, c)) };
+        const result = search(next.board, opposite(side), events.concat(event), movesMade + 1);
+        if (result !== 'no') return result;
+      }
+      return 'no';
+    };
+    return search(INITIAL.slice(), 'B', [], 0);
+  };
+
+  // A standard game always starts with Black. target.sideToMove describes the
+  // requested target interpretation and must never be used as a second root.
+  const result = targetForward();
+  if (result === 'found') {
+    const verified = replay(foundPath);
+    if (!sameBoard(verified.board, t)) return { status: 'ERROR', searchStrategy: 'TARGET_FORWARD', error: 'FOUND replay mismatch', nodesVisited };
+    return { status: 'FOUND', searchStrategy: 'TARGET_FORWARD', nodesVisited, cacheSize: forwardCacheSize, cacheEvictions, elapsedMs: Date.now() - startTime, solution: { events: foundPath } };
+  }
+  if (result === 'cancel') return { status: 'CANCELLED', searchStrategy: 'TARGET_FORWARD', nodesVisited, cacheSize: forwardCacheSize, cacheEvictions, elapsedMs: Date.now() - startTime };
 
   const dfs = (board, sideToMove, reverseEvents) => {
     if (cancelled()) return 'cancel';
@@ -516,7 +552,7 @@ function reconstruct(target, options = {}) {
       return 'timeout';
     }
     nodesVisited += 1;
-    if (nodesVisited === 1 || nodesVisited % 100 === 0) progress(board);
+    if (nodesVisited === 1 || nodesVisited % 100 === 0) progress(board, failed.size, 'REVERSE_DFS');
 
     const key = canonicalKey(board, sideToMove);
     if (failed.has(key)) return 'no';
@@ -641,13 +677,13 @@ const api = {
   canonicalKey,
   canonicalStateKey: canonicalKey,
   colorPreservingSymmetries: COLOR_PRESERVING_SYMMETRIES.map(({ name }) => name),
-  verifiedSolutionBook: VERIFIED_SOLUTION_BOOK,
   flips,
   legal,
   apply,
   coord,
   parseCoord,
   validate,
+  targetPruneReason,
   generatePredecessors,
   predecessors: generatePredecessors,
   eventLabel,

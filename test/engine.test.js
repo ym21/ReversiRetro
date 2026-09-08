@@ -1,5 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const E = require('../engine');
 
 function play(board, player, square) {
@@ -40,13 +42,6 @@ function deterministicGame(plies) {
     side = E.opposite(side);
   }
   return { board, events, side };
-}
-
-function eventCounts(events) {
-  return {
-    moves: events.filter((event) => event.type === 'MOVE').length,
-    passes: events.filter((event) => event.type === 'PASS').length,
-  };
 }
 
 test('initial legal moves and forward application', () => {
@@ -199,44 +194,34 @@ test('several deterministic reachable positions reconstruct', () => {
   }
 });
 
-test('verified book reconstructs the all-white terminal board with zero budgets', () => {
+test('target-directed forward search derives the all-white terminal board', () => {
   const target = Array(8).fill('WWWWWWWW');
   const result = E.reconstruct(target, {
     positionType: 'terminal',
-    maxNodes: 0,
-    maxMs: 0,
+    maxNodes: 5000000,
+    maxMs: 30000,
   });
   assert.equal(result.status, 'FOUND');
-  assert.equal(result.searchStrategy, 'VERIFIED_BOOK');
-  assert.equal(result.nodesVisited, 0);
-  assert.deepEqual(eventCounts(result.solution.events), { moves: 60, passes: 6 });
+  assert.equal(result.searchStrategy, 'TARGET_FORWARD');
+  assert.ok(result.nodesVisited > 0);
+  assert.ok(result.nodesVisited < 5000000);
   assert.deepEqual(E.replay(result.solution.events).board, target);
 });
 
-test('verified book reconstructs the all-black terminal board with zero budgets', () => {
-  const target = Array(8).fill('BBBBBBBB');
-  const result = E.reconstruct(target, {
-    positionType: 'terminal',
-    maxNodes: 0,
-    maxMs: 0,
-  });
-  assert.equal(result.status, 'FOUND');
-  assert.equal(result.searchStrategy, 'VERIFIED_BOOK');
-  assert.equal(result.nodesVisited, 0);
-  assert.deepEqual(eventCounts(result.solution.events), { moves: 60, passes: 5 });
-  assert.deepEqual(E.replay(result.solution.events).board, target);
+test('target-directed pruning rejects immutable conflicts', () => {
+  const whiteTarget = Array(8).fill('WWWWWWWW');
+  assert.equal(E.targetPruneReason(['B.......', ...Array(7).fill('........')], whiteTarget), 'corner-mismatch');
+  const targetWithHole = ['.WWWWWWW', ...Array(7).fill('WWWWWWWW')];
+  assert.equal(E.targetPruneReason(['B.......', ...Array(7).fill('........')], targetWithHole), 'target-empty-occupancy');
+  const stableEdgeBoard = ['BBB.....', ...Array(7).fill('........')];
+  const conflictingEdgeTarget = ['BBW.....', ...Array(7).fill('........')];
+  assert.equal(E.targetPruneReason(stableEdgeBoard, conflictingEdgeTarget), 'stable-edge-mismatch');
 });
 
-test('verified book does not return a false hit for a non-book terminal board', () => {
-  const target = ['BWWWWWWW', ...Array(7).fill('WWWWWWWW')];
-  const result = E.reconstruct(target, {
-    positionType: 'terminal',
-    maxNodes: 0,
-    maxMs: 0,
-  });
-  assert.equal(E.validate(target, { positionType: 'terminal' }), null);
-  assert.notEqual(result.searchStrategy, 'VERIFIED_BOOK');
-  assert.notEqual(result.status, 'FOUND');
+test('source contains no verified transcript book', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'engine.js'), 'utf8');
+  assert.doesNotMatch(source, /VERIFIED_BOOK|VERIFIED_SOLUTION_BOOK|buildVerifiedBookLine/);
+  assert.doesNotMatch(source, /coordinates\s*:\s*Object\.freeze/);
 });
 
 test('canonical failed-cache keys preserve colours and include side to move', () => {
