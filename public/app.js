@@ -13,6 +13,7 @@
     go: $('go'),
     cancel: $('cancel'),
     copy: $('copy'),
+    searchMode: $('search-mode'),
     first: $('first'),
     prev: $('prev'),
     play: $('play'),
@@ -31,7 +32,20 @@
   let startedAt = 0;
   let elapsedTimer = null;
   let playTimer = null;
-  let lastMetrics = { nodesVisited: 0, cacheSize: 0, currentStones: 4, elapsedMs: 0 };
+  let activeSearchMode = null;
+  let lastMetrics = {
+    nodesVisited: 0,
+    cacheSize: 0,
+    cacheEvictions: 0,
+    currentStones: 4,
+    elapsedMs: 0,
+  };
+
+  const searchProfiles = {
+    quick: { label: 'クイック', maxNodes: 50000, maxMs: 3000, maxCacheEntries: 50000 },
+    thorough: { label: 'じっくり', maxNodes: 5000000, maxMs: 300000, maxCacheEntries: 250000 },
+    unlimited: { label: '無制限', unlimited: true, maxCacheEntries: 500000 },
+  };
 
   function formatElapsed(milliseconds) {
     if (!Number.isFinite(milliseconds)) return '—';
@@ -46,6 +60,9 @@
     $('elapsed').textContent = formatElapsed(lastMetrics.elapsedMs);
     $('nodes').textContent = Number.isFinite(lastMetrics.nodesVisited) ? lastMetrics.nodesVisited.toLocaleString('ja-JP') : '—';
     $('cache').textContent = Number.isFinite(lastMetrics.cacheSize) ? lastMetrics.cacheSize.toLocaleString('ja-JP') : '—';
+    $('cache-evictions').textContent = Number.isFinite(lastMetrics.cacheEvictions)
+      ? lastMetrics.cacheEvictions.toLocaleString('ja-JP')
+      : '—';
     $('current-stones').textContent = Number.isFinite(lastMetrics.currentStones) ? `${lastMetrics.currentStones} 石` : '—';
   }
 
@@ -176,6 +193,7 @@
     $('counts').textContent = `黒 ${numbers.black} / 白 ${numbers.white} / 空 ${numbers.empty}`;
     controls.cancel.disabled = !running;
     controls.copy.disabled = events.length === 0;
+    controls.searchMode.disabled = running;
   }
 
   function clearTranscript() {
@@ -217,7 +235,10 @@
       if (data.type === 'progress') {
         updateMetrics(data);
         const elapsed = Number.isFinite(data.elapsedMs) ? formatElapsed(data.elapsedMs) : formatElapsed(Date.now() - startedAt);
-        $('status').textContent = `探索中 — ${data.nodesVisited.toLocaleString('ja-JP')} ノード / ${data.currentStones} 石 / キャッシュ ${data.cacheSize.toLocaleString('ja-JP')} / ${elapsed}`;
+        const evictions = data.cacheEvictions > 0
+          ? ` / 退避 ${data.cacheEvictions.toLocaleString('ja-JP')}`
+          : '';
+        $('status').textContent = `${activeSearchMode?.label || ''}探索中 — ${data.nodesVisited.toLocaleString('ja-JP')} ノード / ${data.currentStones} 石 / キャッシュ ${data.cacheSize.toLocaleString('ja-JP')}${evictions} / ${elapsed}`;
         return;
       }
       if (data.type === 'result') finishSearch(data.result || { status: 'ERROR', error: '探索結果が空です' }, ownedWorker);
@@ -229,6 +250,7 @@
   function finishSearch(result, ownedWorker) {
     if (ownedWorker !== worker) return;
     running = false;
+    activeSearchMode = null;
     clearInterval(elapsedTimer);
     elapsedTimer = null;
     worker = null;
@@ -236,6 +258,7 @@
     updateMetrics({
       nodesVisited: result.nodesVisited ?? lastMetrics.nodesVisited,
       cacheSize: result.cacheSize ?? lastMetrics.cacheSize,
+      cacheEvictions: result.cacheEvictions ?? lastMetrics.cacheEvictions,
       elapsedMs: result.elapsedMs ?? (Date.now() - startedAt),
     });
 
@@ -261,7 +284,7 @@
       snapshots = [];
       replayMode = false;
     } else if (result.status === 'UNKNOWN_TIMEOUT') {
-      setStatus('制限時間内に判定できませんでした（到達不能とは限りません）。', 'error');
+      setStatus('探索上限に達しました（到達不能とは限りません）。必要なら無制限モードで再実行してください。', 'error');
     } else if (result.status === 'CANCELLED') {
       setStatus('探索を停止しました。', '');
     } else {
@@ -275,9 +298,16 @@
     if (validation || running) return;
     clearTranscript();
     running = true;
+    activeSearchMode = searchProfiles[controls.searchMode.value] || searchProfiles.quick;
     startedAt = Date.now();
-    updateMetrics({ nodesVisited: 0, cacheSize: 0, currentStones: E.count(inputBoard).black + E.count(inputBoard).white, elapsedMs: 0 });
-    setStatus('探索を開始しました。', 'running');
+    updateMetrics({
+      nodesVisited: 0,
+      cacheSize: 0,
+      cacheEvictions: 0,
+      currentStones: E.count(inputBoard).black + E.count(inputBoard).white,
+      elapsedMs: 0,
+    });
+    setStatus(`${activeSearchMode.label}モードで探索を開始しました。`, 'running');
     render();
     elapsedTimer = setInterval(() => updateMetrics({ elapsedMs: Date.now() - startedAt }), 250);
     const activeWorker = createWorker();
@@ -285,14 +315,17 @@
       type: 'start',
       positionType: 'terminal',
       board: inputBoard.slice(),
-      maxNodes: 50000,
-      maxMs: 3000,
+      maxNodes: activeSearchMode.maxNodes,
+      maxMs: activeSearchMode.maxMs,
+      maxCacheEntries: activeSearchMode.maxCacheEntries,
+      unlimited: activeSearchMode.unlimited === true,
     });
   }
 
   function cancelSearch() {
     if (!running) return;
     running = false;
+    activeSearchMode = null;
     clearInterval(elapsedTimer);
     elapsedTimer = null;
     if (worker) {

@@ -19,6 +19,8 @@ self.onmessage = (message) => {
       positionType: data.positionType || 'terminal',
       maxNodes: data.maxNodes,
       maxMs: data.maxMs,
+      unlimited: data.unlimited,
+      maxCacheEntries: data.maxCacheEntries,
       cancelled: () => cancelled,
       onProgress: (progress) => self.postMessage({ type: 'progress', ...progress }),
     });

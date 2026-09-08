@@ -159,6 +159,30 @@ test('timeout and cancellation are not reported as proofs', () => {
   }).status, 'CANCELLED');
 });
 
+test('unlimited mode ignores finite zero budgets', () => {
+  const target = deterministicGame(6).board;
+  const result = E.reconstruct(target, {
+    positionType: 'any',
+    unlimited: true,
+    maxNodes: 0,
+    maxMs: 0,
+  });
+  assert.equal(result.status, 'FOUND');
+  assert.deepEqual(E.replay(result.solution.events).board, target);
+});
+
+test('bounded cache evicts old failures without losing reachable solutions', () => {
+  const target = deterministicGame(11).board;
+  const result = E.reconstruct(target, {
+    positionType: 'any',
+    unlimited: true,
+    maxCacheEntries: 1,
+  });
+  assert.equal(result.status, 'FOUND');
+  assert.ok(result.cacheEvictions > 0);
+  assert.deepEqual(E.replay(result.solution.events).board, target);
+});
+
 test('several deterministic reachable positions reconstruct', () => {
   for (const plies of [2, 3, 4, 5, 6, 9, 11]) {
     const target = deterministicGame(plies).board;

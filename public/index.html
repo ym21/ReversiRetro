@@ -33,6 +33,15 @@
           <textarea id="text" rows="8" spellcheck="false" aria-describedby="input-status"></textarea>
           <div id="counts" class="counts" aria-live="polite"></div>
           <p id="input-status" class="input-status" aria-live="polite"></p>
+          <div class="search-options">
+            <label for="search-mode">探索モード</label>
+            <select id="search-mode" aria-describedby="search-mode-help">
+              <option value="quick">クイック（最大5万ノード / 3秒）</option>
+              <option value="thorough">じっくり（最大500万ノード / 5分）</option>
+              <option value="unlimited">無制限（停止するまで継続）</option>
+            </select>
+            <p id="search-mode-help">無制限モードは数時間以上かかる場合があります。探索中はこのタブを開いたままにしてください。</p>
+          </div>
           <div class="actions">
             <button type="button" id="go" class="primary">手順を復元</button>
             <button type="button" id="cancel" disabled>停止</button>
@@ -48,6 +57,7 @@
           <div><dt>経過</dt><dd id="elapsed">—</dd></div>
           <div><dt>探索ノード</dt><dd id="nodes">—</dd></div>
           <div><dt>キャッシュ</dt><dd id="cache">—</dd></div>
+          <div><dt>キャッシュ退避</dt><dd id="cache-evictions">—</dd></div>
           <div><dt>現在の石数</dt><dd id="current-stones">—</dd></div>
         </dl>
       </section>

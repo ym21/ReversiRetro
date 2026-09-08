@@ -291,16 +291,44 @@ function reconstruct(target, options = {}) {
   const validationError = validate(t, { positionType });
   if (validationError) return { status: 'INVALID_INPUT', error: validationError };
 
-  const maxNodes = Number.isFinite(options.maxNodes) ? Math.max(0, Math.floor(options.maxNodes)) : 50000;
-  const maxMs = Number.isFinite(options.maxMs) ? Math.max(0, options.maxMs) : 3000;
+  const unlimited = options.unlimited === true;
+  const maxNodes = unlimited || options.maxNodes === null
+    ? null
+    : (Number.isFinite(options.maxNodes) ? Math.max(0, Math.floor(options.maxNodes)) : 50000);
+  const maxMs = unlimited || options.maxMs === null
+    ? null
+    : (Number.isFinite(options.maxMs) ? Math.max(0, options.maxMs) : 3000);
+  const maxCacheEntries = Number.isFinite(options.maxCacheEntries)
+    ? Math.max(1, Math.floor(options.maxCacheEntries))
+    : (unlimited ? 500000 : 100000);
   const onProgress = typeof options.onProgress === 'function' ? options.onProgress : () => {};
   const cancelled = typeof options.cancelled === 'function' ? options.cancelled : () => false;
   const startTime = Date.now();
-  const deadline = startTime + maxMs;
+  const deadline = maxMs === null ? null : startTime + maxMs;
   let nodesVisited = 0;
   let timedOut = false;
   let foundPath = null;
   const failed = new Set();
+  let cacheEvictions = 0;
+
+  // Failed states are only a speed optimization. Removing older entries may
+  // cause repeated work, but it cannot remove a legal path or create a false
+  // proof. Set iteration order is insertion order, so this is a bounded FIFO
+  // cache rather than an all-at-once reset.
+  const rememberFailed = (key) => {
+    if (failed.has(key)) return;
+    if (failed.size >= maxCacheEntries) {
+      const removeCount = Math.max(1, Math.ceil(maxCacheEntries / 4));
+      const oldest = failed.values();
+      for (let index = 0; index < removeCount; index += 1) {
+        const entry = oldest.next();
+        if (entry.done) break;
+        failed.delete(entry.value);
+        cacheEvictions += 1;
+      }
+    }
+    failed.add(key);
+  };
 
   const progress = (board) => {
     try {
@@ -308,6 +336,7 @@ function reconstruct(target, options = {}) {
         nodesVisited,
         currentStones: count(board).black + count(board).white,
         cacheSize: failed.size,
+        cacheEvictions,
         elapsedMs: Date.now() - startTime,
       });
     } catch {
@@ -321,7 +350,7 @@ function reconstruct(target, options = {}) {
       foundPath = reverseEvents.slice().reverse();
       return 'found';
     }
-    if (Date.now() >= deadline || nodesVisited >= maxNodes) {
+    if ((deadline !== null && Date.now() >= deadline) || (maxNodes !== null && nodesVisited >= maxNodes)) {
       timedOut = true;
       return 'timeout';
     }
@@ -332,7 +361,7 @@ function reconstruct(target, options = {}) {
     if (failed.has(key)) return 'no';
     const stones = count(board);
     if (stones.black + stones.white === 4) {
-      failed.add(key);
+      rememberFailed(key);
       return 'no';
     }
 
@@ -360,7 +389,7 @@ function reconstruct(target, options = {}) {
       if (result === 'timeout') return result;
     }
 
-    failed.add(key);
+    rememberFailed(key);
     return 'no';
   };
 
@@ -377,27 +406,62 @@ function reconstruct(target, options = {}) {
       try {
         verified = replay(foundPath);
       } catch (error) {
-        return { status: 'ERROR', error: `FOUND replay verification failed: ${error.message}`, nodesVisited, cacheSize: failed.size };
+        return {
+          status: 'ERROR',
+          error: `FOUND replay verification failed: ${error.message}`,
+          nodesVisited,
+          cacheSize: failed.size,
+          cacheEvictions,
+        };
       }
       if (!sameBoard(verified.board, t)) {
-        return { status: 'ERROR', error: 'FOUND replay verification ended at another board', nodesVisited, cacheSize: failed.size };
+        return {
+          status: 'ERROR',
+          error: 'FOUND replay verification ended at another board',
+          nodesVisited,
+          cacheSize: failed.size,
+          cacheEvictions,
+        };
       }
       return {
         status: 'FOUND',
         nodesVisited,
         cacheSize: failed.size,
+        cacheEvictions,
         elapsedMs: Date.now() - startTime,
         solution: { events: foundPath },
       };
     }
-    if (result === 'cancel') return { status: 'CANCELLED', nodesVisited, cacheSize: failed.size, elapsedMs: Date.now() - startTime };
+    if (result === 'cancel') {
+      return {
+        status: 'CANCELLED',
+        nodesVisited,
+        cacheSize: failed.size,
+        cacheEvictions,
+        elapsedMs: Date.now() - startTime,
+      };
+    }
     // Do not turn a timeout on one root side into a proof. The other root is
     // still attempted when budget remains, and the aggregate result below
     // reports UNKNOWN_TIMEOUT if any root was cut short.
   }
 
-  if (timedOut) return { status: 'UNKNOWN_TIMEOUT', nodesVisited, cacheSize: failed.size, elapsedMs: Date.now() - startTime };
-  return { status: 'UNREACHABLE_PROVEN', nodesVisited, cacheSize: failed.size, elapsedMs: Date.now() - startTime };
+  if (timedOut) {
+    return {
+      status: 'UNKNOWN_TIMEOUT',
+      nodesVisited,
+      cacheSize: failed.size,
+      cacheEvictions,
+      elapsedMs: Date.now() - startTime,
+    };
+  }
+  return {
+    status: 'UNREACHABLE_PROVEN',
+    nodesVisited,
+    cacheSize: failed.size,
+    cacheEvictions,
+    elapsedMs: Date.now() - startTime,
+  };
 }
 
 const api = {
