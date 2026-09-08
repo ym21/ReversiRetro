@@ -82,7 +82,7 @@ textarea:focus { border-color: var(--accent); outline: 2px solid #f2bf5e33; }
 .badge.success { background: #1f583c; color: var(--ok); }
 .badge.error { background: #5b2c2c; color: var(--danger); }
 .status { color: var(--muted); margin: 13px 0 15px; min-height: 1.5em; }
-.metrics { display: grid; gap: 8px; grid-template-columns: repeat(5, 1fr); margin: 0; }
+.metrics { display: grid; gap: 8px; grid-template-columns: repeat(6, 1fr); margin: 0; }
 .metrics div { background: var(--panel-soft); border-radius: 9px; padding: 8px 10px; }
 .metrics dt { color: var(--muted); font-size: .72rem; }
 .metrics dd { font-variant-numeric: tabular-nums; margin: 2px 0 0; }

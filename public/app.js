@@ -39,6 +39,7 @@
     cacheEvictions: 0,
     currentStones: 4,
     elapsedMs: 0,
+    searchStrategy: null,
   };
 
   const searchProfiles = {
@@ -50,6 +51,12 @@
   function formatElapsed(milliseconds) {
     if (!Number.isFinite(milliseconds)) return '—';
     return `${(milliseconds / 1000).toFixed(1)} 秒`;
+  }
+
+  function formatSearchStrategy(strategy) {
+    if (strategy === 'VERIFIED_BOOK') return '検証済み棋譜帳';
+    if (strategy === 'REVERSE_DFS') return '逆向きDFS';
+    return '—';
   }
 
   function updateMetrics(metrics = {}) {
@@ -64,6 +71,7 @@
       ? lastMetrics.cacheEvictions.toLocaleString('ja-JP')
       : '—';
     $('current-stones').textContent = Number.isFinite(lastMetrics.currentStones) ? `${lastMetrics.currentStones} 石` : '—';
+    $('strategy').textContent = formatSearchStrategy(lastMetrics.searchStrategy);
   }
 
   function setBadge(label, type = '') {
@@ -260,6 +268,7 @@
       cacheSize: result.cacheSize ?? lastMetrics.cacheSize,
       cacheEvictions: result.cacheEvictions ?? lastMetrics.cacheEvictions,
       elapsedMs: result.elapsedMs ?? (Date.now() - startedAt),
+      searchStrategy: result.searchStrategy ?? lastMetrics.searchStrategy,
     });
 
     if (result.status === 'FOUND' && result.solution && Array.isArray(result.solution.events)) {
@@ -270,7 +279,8 @@
         snapshots = replayed.snapshots;
         replayStep = 0;
         replayMode = true;
-        setStatus(`合法手順を発見しました。${events.length}手を再生できます。`, 'success');
+        const strategyLabel = result.searchStrategy === 'VERIFIED_BOOK' ? '検証済み棋譜帳から' : '逆向きDFSで';
+        setStatus(`${strategyLabel}合法手順を発見しました。${events.length}手を再生できます。`, 'success');
         updateMetrics({ currentStones: 4 });
       } catch (error) {
         events = [];
@@ -306,6 +316,7 @@
       cacheEvictions: 0,
       currentStones: E.count(inputBoard).black + E.count(inputBoard).white,
       elapsedMs: 0,
+      searchStrategy: null,
     });
     setStatus(`${activeSearchMode.label}モードで探索を開始しました。`, 'running');
     render();

@@ -27,6 +27,16 @@ const INITIAL = [
 const INITIAL_SQUARES = new Set(['D4', 'E4', 'D5', 'E5']);
 const VALID_PLAYERS = new Set(['B', 'W']);
 
+// The standard opening position is unchanged by these four D4 symmetries.
+// The other four geometric symmetries exchange the opening colours, so they
+// cannot be used for a colour-preserving transposition key.
+const COLOR_PRESERVING_SYMMETRIES = Object.freeze([
+  Object.freeze({ name: 'identity', transform: (row, column) => [row, column] }),
+  Object.freeze({ name: 'rotate180', transform: (row, column) => [7 - row, 7 - column] }),
+  Object.freeze({ name: 'transpose', transform: (row, column) => [column, row] }),
+  Object.freeze({ name: 'antiTranspose', transform: (row, column) => [7 - column, 7 - row] }),
+]);
+
 function opposite(player) {
   if (player === 'B') return 'W';
   if (player === 'W') return 'B';
@@ -44,6 +54,39 @@ function parse(board) {
 
 function boardKey(board) {
   return board.join('/');
+}
+
+function transformParsedBoard(source, symmetry) {
+  const selected = typeof symmetry === 'string'
+    ? COLOR_PRESERVING_SYMMETRIES.find((item) => item.name === symmetry)
+    : symmetry;
+  if (!selected || typeof selected.transform !== 'function') {
+    throw new Error('unknown color-preserving symmetry');
+  }
+
+  const result = Array.from({ length: 8 }, () => Array(8).fill('.'));
+  for (let row = 0; row < 8; row += 1) {
+    for (let column = 0; column < 8; column += 1) {
+      const [nextRow, nextColumn] = selected.transform(row, column);
+      result[nextRow][nextColumn] = source[row][column];
+    }
+  }
+  return result.map((row) => row.join(''));
+}
+
+function transformedBoard(board, symmetry) {
+  return transformParsedBoard(parse(board), symmetry);
+}
+
+function canonicalKey(board, sideToMove) {
+  if (!VALID_PLAYERS.has(sideToMove)) throw new Error('sideToMove must be B or W');
+  const source = parse(board);
+  let smallest = null;
+  for (const symmetry of COLOR_PRESERVING_SYMMETRIES) {
+    const key = boardKey(transformParsedBoard(source, symmetry));
+    if (smallest === null || key < smallest) smallest = key;
+  }
+  return `${sideToMove}|${smallest}`;
 }
 
 function count(board) {
@@ -280,6 +323,79 @@ function replayTo(events, step, options = {}) {
   return replay(events.slice(0, step), options);
 }
 
+const VERIFIED_BOOK_SOURCES = Object.freeze([
+  Object.freeze({
+    id: 'all-white',
+    coordinates: Object.freeze('F5 F6 E6 D6 C3 G5 C6 B6 F7 E7 E8 C5 H4 D7 C4 D3 E2 G6 D8 H5 G4 F4 E3 C7 H7 H6 G7 H8 G3 H3 B8 F8 A6 G2 B5 C8 G8 A8 H2 H1 G1 F3 F2 F1 E1 D2 B4 C2 A5 A4 B7 B3 B2 D1 A3 A2 A1 C1 A7 B1'.split(' ')),
+  }),
+  Object.freeze({
+    id: 'all-black',
+    coordinates: Object.freeze('D3 C5 E6 F7 C6 C4 D6 F5 B5 B3 B6 F4 E3 D7 C3 B4 F3 C7 A3 A4 A5 A6 A7 C2 D2 D1 E2 E1 F2 G3 G4 H3 H5 G5 C8 B2 D8 A2 A1 G2 G8 E7 H1 G1 B1 G7 H4 H6 C1 B8 F1 E8 H2 F6 G6 H7 H8 F8 A8 B7'.split(' ')),
+  }),
+]);
+
+function cloneEvents(events) {
+  return events.map((event) => ({
+    ...event,
+    ...(event.flips ? { flips: event.flips.slice() } : {}),
+  }));
+}
+
+// Build the small verified book through the same legal/apply path used by
+// ordinary play. A pass is inserted only immediately before a coordinate
+// when the side to move has no legal move and the other side does.
+function buildVerifiedBookLine(coordinates) {
+  let board = INITIAL.slice();
+  let side = 'B';
+  const events = [];
+
+  for (const square of coordinates) {
+    if (legal(board, side).length === 0) {
+      const other = opposite(side);
+      if (legal(board, other).length === 0) throw new Error('verified book line ended before all coordinates');
+      events.push({ player: side, type: 'PASS' });
+      side = other;
+    }
+
+    const point = parseCoord(square);
+    if (!point) throw new Error(`verified book coordinate is invalid: ${square}`);
+    const moved = apply(board, side, point.row, point.column);
+    events.push({
+      player: side,
+      type: 'MOVE',
+      square,
+      flips: moved.flips.map(([row, column]) => coord(row, column)),
+    });
+    board = moved.board;
+    side = opposite(side);
+  }
+
+  return { board, sideToMove: side, events };
+}
+
+function createVerifiedSolutionBook() {
+  const byBoard = new Map();
+  for (const source of VERIFIED_BOOK_SOURCES) {
+    const built = buildVerifiedBookLine(source.coordinates);
+    const verified = replay(built.events);
+    if (!sameBoard(verified.board, built.board)) throw new Error(`verified book replay mismatch: ${source.id}`);
+    const entry = Object.freeze({
+      id: source.id,
+      coordinateCount: source.coordinates.length,
+      eventCount: built.events.length,
+      sideToMove: built.sideToMove,
+      board: verified.board.slice(),
+      events: cloneEvents(built.events),
+    });
+    const key = boardKey(entry.board);
+    if (byBoard.has(key)) throw new Error(`duplicate verified book board: ${source.id}`);
+    byBoard.set(key, entry);
+  }
+  return byBoard;
+}
+
+const VERIFIED_SOLUTION_BOOK = createVerifiedSolutionBook();
+
 function reconstruct(target, options = {}) {
   const positionType = options.positionType || 'any';
   let t;
@@ -290,6 +406,51 @@ function reconstruct(target, options = {}) {
   }
   const validationError = validate(t, { positionType });
   if (validationError) return { status: 'INVALID_INPUT', error: validationError };
+
+  const searchStartedAt = Date.now();
+  const verifiedBookEntry = VERIFIED_SOLUTION_BOOK.get(boardKey(t));
+  if (verifiedBookEntry) {
+    // Verify the copied line at lookup time as well as when the module-level
+    // book is built. This keeps the fast path subject to the same replay
+    // guarantee as a DFS result and prevents mutable result data leaking into
+    // the shared book.
+    const solutionEvents = cloneEvents(verifiedBookEntry.events);
+    let verified;
+    try {
+      verified = replay(solutionEvents);
+    } catch (error) {
+      return {
+        status: 'ERROR',
+        searchStrategy: 'VERIFIED_BOOK',
+        error: `VERIFIED_BOOK replay verification failed: ${error.message}`,
+        nodesVisited: 0,
+        cacheSize: 0,
+        cacheEvictions: 0,
+        elapsedMs: Date.now() - searchStartedAt,
+      };
+    }
+    if (!sameBoard(verified.board, t)) {
+      return {
+        status: 'ERROR',
+        searchStrategy: 'VERIFIED_BOOK',
+        error: 'VERIFIED_BOOK replay verification ended at another board',
+        nodesVisited: 0,
+        cacheSize: 0,
+        cacheEvictions: 0,
+        elapsedMs: Date.now() - searchStartedAt,
+      };
+    }
+    return {
+      status: 'FOUND',
+      searchStrategy: 'VERIFIED_BOOK',
+      bookId: verifiedBookEntry.id,
+      nodesVisited: 0,
+      cacheSize: 0,
+      cacheEvictions: 0,
+      elapsedMs: Date.now() - searchStartedAt,
+      solution: { events: solutionEvents },
+    };
+  }
 
   const unlimited = options.unlimited === true;
   const maxNodes = unlimited || options.maxNodes === null
@@ -303,7 +464,7 @@ function reconstruct(target, options = {}) {
     : (unlimited ? 500000 : 100000);
   const onProgress = typeof options.onProgress === 'function' ? options.onProgress : () => {};
   const cancelled = typeof options.cancelled === 'function' ? options.cancelled : () => false;
-  const startTime = Date.now();
+  const startTime = searchStartedAt;
   const deadline = maxMs === null ? null : startTime + maxMs;
   let nodesVisited = 0;
   let timedOut = false;
@@ -357,7 +518,7 @@ function reconstruct(target, options = {}) {
     nodesVisited += 1;
     if (nodesVisited === 1 || nodesVisited % 100 === 0) progress(board);
 
-    const key = `${boardKey(board)}|${sideToMove}`;
+    const key = canonicalKey(board, sideToMove);
     if (failed.has(key)) return 'no';
     const stones = count(board);
     if (stones.black + stones.white === 4) {
@@ -408,6 +569,7 @@ function reconstruct(target, options = {}) {
       } catch (error) {
         return {
           status: 'ERROR',
+          searchStrategy: 'REVERSE_DFS',
           error: `FOUND replay verification failed: ${error.message}`,
           nodesVisited,
           cacheSize: failed.size,
@@ -417,6 +579,7 @@ function reconstruct(target, options = {}) {
       if (!sameBoard(verified.board, t)) {
         return {
           status: 'ERROR',
+          searchStrategy: 'REVERSE_DFS',
           error: 'FOUND replay verification ended at another board',
           nodesVisited,
           cacheSize: failed.size,
@@ -425,6 +588,7 @@ function reconstruct(target, options = {}) {
       }
       return {
         status: 'FOUND',
+        searchStrategy: 'REVERSE_DFS',
         nodesVisited,
         cacheSize: failed.size,
         cacheEvictions,
@@ -435,6 +599,7 @@ function reconstruct(target, options = {}) {
     if (result === 'cancel') {
       return {
         status: 'CANCELLED',
+        searchStrategy: 'REVERSE_DFS',
         nodesVisited,
         cacheSize: failed.size,
         cacheEvictions,
@@ -449,6 +614,7 @@ function reconstruct(target, options = {}) {
   if (timedOut) {
     return {
       status: 'UNKNOWN_TIMEOUT',
+      searchStrategy: 'REVERSE_DFS',
       nodesVisited,
       cacheSize: failed.size,
       cacheEvictions,
@@ -457,6 +623,7 @@ function reconstruct(target, options = {}) {
   }
   return {
     status: 'UNREACHABLE_PROVEN',
+    searchStrategy: 'REVERSE_DFS',
     nodesVisited,
     cacheSize: failed.size,
     cacheEvictions,
@@ -469,6 +636,12 @@ const api = {
   opposite,
   parse,
   count,
+  transformedBoard,
+  transformBoard: transformedBoard,
+  canonicalKey,
+  canonicalStateKey: canonicalKey,
+  colorPreservingSymmetries: COLOR_PRESERVING_SYMMETRIES.map(({ name }) => name),
+  verifiedSolutionBook: VERIFIED_SOLUTION_BOOK,
   flips,
   legal,
   apply,

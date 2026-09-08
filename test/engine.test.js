@@ -42,6 +42,13 @@ function deterministicGame(plies) {
   return { board, events, side };
 }
 
+function eventCounts(events) {
+  return {
+    moves: events.filter((event) => event.type === 'MOVE').length,
+    passes: events.filter((event) => event.type === 'PASS').length,
+  };
+}
+
 test('initial legal moves and forward application', () => {
   const moves = E.legal(E.initial, 'B');
   assert.equal(moves.length, 4);
@@ -190,4 +197,62 @@ test('several deterministic reachable positions reconstruct', () => {
     assert.equal(result.status, 'FOUND', `plies=${plies} status=${result.status}`);
     assert.deepEqual(E.replay(result.solution.events).board, target);
   }
+});
+
+test('verified book reconstructs the all-white terminal board with zero budgets', () => {
+  const target = Array(8).fill('WWWWWWWW');
+  const result = E.reconstruct(target, {
+    positionType: 'terminal',
+    maxNodes: 0,
+    maxMs: 0,
+  });
+  assert.equal(result.status, 'FOUND');
+  assert.equal(result.searchStrategy, 'VERIFIED_BOOK');
+  assert.equal(result.nodesVisited, 0);
+  assert.deepEqual(eventCounts(result.solution.events), { moves: 60, passes: 6 });
+  assert.deepEqual(E.replay(result.solution.events).board, target);
+});
+
+test('verified book reconstructs the all-black terminal board with zero budgets', () => {
+  const target = Array(8).fill('BBBBBBBB');
+  const result = E.reconstruct(target, {
+    positionType: 'terminal',
+    maxNodes: 0,
+    maxMs: 0,
+  });
+  assert.equal(result.status, 'FOUND');
+  assert.equal(result.searchStrategy, 'VERIFIED_BOOK');
+  assert.equal(result.nodesVisited, 0);
+  assert.deepEqual(eventCounts(result.solution.events), { moves: 60, passes: 5 });
+  assert.deepEqual(E.replay(result.solution.events).board, target);
+});
+
+test('verified book does not return a false hit for a non-book terminal board', () => {
+  const target = ['BWWWWWWW', ...Array(7).fill('WWWWWWWW')];
+  const result = E.reconstruct(target, {
+    positionType: 'terminal',
+    maxNodes: 0,
+    maxMs: 0,
+  });
+  assert.equal(E.validate(target, { positionType: 'terminal' }), null);
+  assert.notEqual(result.searchStrategy, 'VERIFIED_BOOK');
+  assert.notEqual(result.status, 'FOUND');
+});
+
+test('canonical failed-cache keys preserve colours and include side to move', () => {
+  const board = [
+    '........',
+    '..B.....',
+    '...WW...',
+    '...WB...',
+    '...BW...',
+    '.....W..',
+    '........',
+    '........',
+  ];
+  for (const symmetry of E.colorPreservingSymmetries) {
+    const transformed = E.transformBoard(board, symmetry);
+    assert.equal(E.canonicalKey(board, 'B'), E.canonicalKey(transformed, 'B'));
+  }
+  assert.notEqual(E.canonicalKey(board, 'B'), E.canonicalKey(board, 'W'));
 });
